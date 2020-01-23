@@ -98,13 +98,19 @@ class Dynamics():
 class Source(nn.Module):
     def __init__(self, n_actions, n_states):
         super(Source, self).__init__()
-        self.fc = nn.Linear(n_states, 100)
-        self.mu_head = nn.Linear(100, 1)
-        self.var = nn.Linear(100, 1)
+        self.fc1 = nn.Linear(n_states, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, 128)
+        self.fc4 = nn.Linear(128, 128)
+        self.mu_head = nn.Linear(128, 1)
+        self.var = nn.Linear(128, 1)
 
     def forward(self, s):
         s = s.float().unsqueeze(0)
-        x = F.relu(self.fc(s))
+        x = torch.tanh(self.fc1(s))
+        x = torch.tanh(self.fc2(x))
+        x = torch.tanh(self.fc3(x))
+        x = torch.tanh(self.fc4(x))
         mu = self.mu_head(x)
         sig = F.relu(self.var(x))+1e-5
         return mu, sig
@@ -121,19 +127,27 @@ class Planning(nn.Module):
 
     def __init__(self, n_actions, n_states):
         super(Planning, self).__init__()
-        self.fc1 = nn.Linear(n_states, 100)
-        self.fc2 = nn.Linear(n_states, 100)
-        self.fc = nn.Linear(200, 100)
-        self.mu_head = nn.Linear(100, 1)
-        self.var = nn.Linear(100, 1)
+        self.fcs = nn.Linear(n_states, 128)
+        self.fcs_ = nn.Linear(n_states, 128)
+        self.fc = nn.Linear(256, 128)
+        self.fc1 = nn.Linear(128, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, 128)
+        self.fc4 = nn.Linear(128, 128)
+        self.mu_head = nn.Linear(128, 1)
+        self.var = nn.Linear(128, 1)
 
     def forward(self, s, s_next):
         s = s.float().unsqueeze(0)
         s_next = s_next.float().unsqueeze(0)
-        s = F.relu(self.fc1(s))
-        s_next = F.relu(self.fc2(s_next))
+        s = F.relu(self.fcs(s))
+        s_next = F.relu(self.fcs_(s_next))
         s_cat = torch.cat([s, s_next], dim=-1)
-        x = F.relu(self.fc(s_cat))
+        x = torch.tanh(self.fc(s_cat))
+        x = torch.tanh(self.fc1(x))
+        x = torch.tanh(self.fc2(x))
+        x = torch.tanh(self.fc3(x))
+        x = torch.tanh(self.fc4(x))
         mu = self.mu_head(x)
         sig = F.relu(self.var(x)) + 1e-5
         return mu, sig

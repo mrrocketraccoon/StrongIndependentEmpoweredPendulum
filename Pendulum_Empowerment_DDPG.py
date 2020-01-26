@@ -225,6 +225,7 @@ class Agent():
         if self.training_step % 200 == 0:
             self.target_cnet.load_state_dict(self.eval_cnet.state_dict())
         if self.training_step % 201 == 0:
+
             self.target_anet.load_state_dict(self.eval_anet.state_dict())
         self.var = max(self.var * 0.999, 0.01)
 
@@ -243,7 +244,9 @@ epoch = 0
 
 #df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
 #df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
-
+df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
+df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
+#dummy_source_action, dummy_source_log_prob,dummy_source_mean, dummy_source_var, dummy_planning_action, dummy_planning_log_prob, dummy_planning_mean, dummy_planning_var
 while epoch <= 800:
     empowerment = 0
     prev_best_reward = -2000
@@ -271,8 +274,8 @@ while epoch <= 800:
             planning_action, planning_log_prob = planning_network(state_tensor, state_tensor_)
             #Mutual Information and Empowerment
             MI = planning_log_prob - source_log_prob
-            empowerment += BETA*MI + torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),
-                                                                                              torch.tensor([[1.0]])))
+            empowerment += BETA*MI #+ torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),
+                                                                                              #torch.tensor([[1.0]])))
             if memory.isfull:
                 transitions = memory.sample(16)
                 q = agent.update(transitions)
@@ -287,7 +290,7 @@ while epoch <= 800:
                 pickle.dump(training_records, f)
             break
     training_records.append(TrainingRecord(epoch, running_reward, -empowerment.item()))
-    empowerment = -(1/M)*empowerment
+    empowerment = -(1/1)*empowerment
     empowerment.backward(retain_graph=True)
     source_optimizer.step()
     planning_optimizer.step()
@@ -305,10 +308,14 @@ while epoch <= 800:
     dummy_state_tensor = Variable(torch.from_numpy(dummy_state))
     dummy_state_tensor_ = Variable(torch.from_numpy(dummy_state_))
     dummy_source_action, dummy_source_log_prob = source_network(dummy_state_tensor)
+    dummy_source_mean, dummy_source_var = source_network.forward(dummy_state_tensor)
     dummy_planning_action, dummy_planning_log_prob = planning_network(dummy_state_tensor, dummy_state_tensor_)
+    dummy_planning_mean, dummy_planning_var = planning_network.forward(dummy_state_tensor, dummy_state_tensor_)
     print('Test --- state: {}, action:{}, next_state: {},'
           '\n source_action: {}, source_prob: {}, planning_action: {}, planning_prob: {}'.format(dummy_state, dummy_action[0], dummy_state_, dummy_source_action.item(),
             dummy_source_log_prob.item(), dummy_planning_action.item(), dummy_planning_log_prob.item()))
+    print('source_mean: {}, source_var: {}'.format(dummy_source_mean.item(), dummy_source_var.item()))
+    print('planning_mean: {}, planning_var: {}'.format(dummy_planning_mean.item(), dummy_planning_var.item()))
     ###############################################################
 env.close()
 

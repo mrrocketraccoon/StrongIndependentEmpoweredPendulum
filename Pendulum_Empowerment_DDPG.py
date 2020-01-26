@@ -13,7 +13,6 @@ import os
 import pandas as pd
 from gym.wrappers import Monitor
 
-
 i = 0
 while os.path.exists('PendulumRewards/rewards%s.csv' % i):
     i += 1
@@ -111,14 +110,14 @@ class Source(nn.Module):
         x = torch.tanh(self.fc2(x))
         x = torch.tanh(self.fc3(x))
         x = torch.tanh(self.fc4(x))
-        mu = self.mu_head(x)
+        mu = torch.tanh(self.mu_head(x))
         sig = F.relu(self.var(x))+1e-5
         return mu, sig
 
     def select_action(self, state):
         mean, var = self.forward(state)
         dist = Normal(mean, var)
-        action = dist.sample()
+        action = dist.rsample()
         action.clamp(-2.0, 2.0)
         return action, dist.log_prob(action)
 
@@ -148,7 +147,7 @@ class Planning(nn.Module):
         x = torch.tanh(self.fc2(x))
         x = torch.tanh(self.fc3(x))
         x = torch.tanh(self.fc4(x))
-        mu = self.mu_head(x)
+        mu = torch.tanh(self.mu_head(x))
         sig = F.relu(self.var(x)) + 1e-5
         return mu, sig
 
@@ -156,7 +155,7 @@ class Planning(nn.Module):
         state_next = torch.from_numpy(state_next).float().unsqueeze(0)
         mean, variance = self.forward(state, state_next)
         dist = Normal(mean, variance)
-        action = dist.sample()
+        action = dist.rsample()
         action.clamp(-2.0, 2.0)
         return action, dist.log_prob(action)
 
@@ -238,17 +237,16 @@ agent = Agent(n_actions=1, n_states=3)
 forward_dynamics = Dynamics()
 source_network = Source(n_actions=1, n_states=3)
 planning_network = Planning(n_actions=1, n_states=3)
-source_optimizer = optim.Adam(source_network.parameters(), lr=1e-5)
-planning_optimizer = optim.Adam(planning_network.parameters(), lr=1e-5
-                                )
+source_optimizer = optim.Adam(source_network.parameters(), lr=1e-4)
+planning_optimizer = optim.Adam(planning_network.parameters(), lr=1e-4)
 epoch = 0
 
-df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
-df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
-
+#df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
+#df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
 
 while epoch <= 800:
     empowerment = 0
+    prev_best_reward = -2000
     source_optimizer.zero_grad()
     planning_optimizer.zero_grad()
     for m in range(M):
@@ -273,31 +271,45 @@ while epoch <= 800:
             planning_action, planning_log_prob = planning_network(state_tensor, state_tensor_)
             #Mutual Information and Empowerment
             MI = planning_log_prob - source_log_prob
-            empowerment += -(BETA*MI + torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),torch.tensor([[1.0]]))))
+            empowerment += BETA*MI + torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),
+                                                                                              torch.tensor([[1.0]])))
             if memory.isfull:
                 transitions = memory.sample(16)
                 q = agent.update(transitions)
                 running_q = 0.99 * running_q + 0.01 * q
         running_reward = running_reward * 0.9 + score * 0.1
-        training_records.append(TrainingRecord(epoch, running_reward, -empowerment.item()))
-        if running_reward > -200:
-            print("Solved! Running reward is now {}!".format(running_reward))
+        if running_reward > -200 and running_reward > prev_best_reward:
+            prev_best_reward = running_reward
+            print("Better policy found, reward is now {}!".format(running_reward))
             torch.save(agent.eval_anet.state_dict(), 'ddpg_anet_params.pkl')
             torch.save(agent.eval_cnet.state_dict(), 'ddpg_cnet_params.pkl')
             with open('ddpg_training_records.pkl', 'wb') as f:
                 pickle.dump(training_records, f)
             break
-
+    training_records.append(TrainingRecord(epoch, running_reward, -empowerment.item()))
+    empowerment = -(1/M)*empowerment
     empowerment.backward(retain_graph=True)
     source_optimizer.step()
     planning_optimizer.step()
     print('Epoch {}\tAverage score: {:.2f}\tAverage Q: {:.2f}\tEmpowerment: {:.2f}'.format(
                 epoch, running_reward, running_q, -empowerment.item()))
-    df = pd.DataFrame({'epoch':[epoch], 'avg_score':[running_reward], 'avg_Q':[running_q], 'empowerment':[-empowerment.item()]})
-    df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=None,mode = 'a')
+    #df = pd.DataFrame({'epoch':[epoch], 'avg_score':[running_reward], 'avg_Q':[running_q],
+    #                   'empowerment':[-empowerment.item()]})
+    #df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=None,mode = 'a')
     epoch += 1
     BETA += (2000-5)/800
-
+    ######### Means and Variances debugging ######################
+    dummy_state = np.array([1,0,0])
+    dummy_action = (1.0,)
+    dummy_state_ = np.asarray(forward_dynamics.step(dummy_action, dummy_state)[0])
+    dummy_state_tensor = Variable(torch.from_numpy(dummy_state))
+    dummy_state_tensor_ = Variable(torch.from_numpy(dummy_state_))
+    dummy_source_action, dummy_source_log_prob = source_network(dummy_state_tensor)
+    dummy_planning_action, dummy_planning_log_prob = planning_network(dummy_state_tensor, dummy_state_tensor_)
+    print('Test --- state: {}, action:{}, next_state: {},'
+          '\n source_action: {}, source_prob: {}, planning_action: {}, planning_prob: {}'.format(dummy_state, dummy_action[0], dummy_state_, dummy_source_action.item(),
+            dummy_source_log_prob.item(), dummy_planning_action.item(), dummy_planning_log_prob.item()))
+    ##############################################################
 env.close()
 
 plt.plot([r.epoch for r in training_records], [r.reward for r in training_records])

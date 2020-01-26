@@ -298,7 +298,7 @@ while epoch <= 800:
     #df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=None,mode = 'a')
     epoch += 1
     BETA += (2000-5)/800
-    ######### Means and Variances debugging ######################
+    ########## Means and Variances debugging ######################
     dummy_state = np.array([1,0,0])
     dummy_action = (1.0,)
     dummy_state_ = np.asarray(forward_dynamics.step(dummy_action, dummy_state)[0])
@@ -309,7 +309,7 @@ while epoch <= 800:
     print('Test --- state: {}, action:{}, next_state: {},'
           '\n source_action: {}, source_prob: {}, planning_action: {}, planning_prob: {}'.format(dummy_state, dummy_action[0], dummy_state_, dummy_source_action.item(),
             dummy_source_log_prob.item(), dummy_planning_action.item(), dummy_planning_log_prob.item()))
-    ##############################################################
+    ###############################################################
 env.close()
 
 plt.plot([r.epoch for r in training_records], [r.reward for r in training_records])

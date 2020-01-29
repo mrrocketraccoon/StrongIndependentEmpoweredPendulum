@@ -12,6 +12,7 @@ import numpy as np
 import os
 import pandas as pd
 from gym.wrappers import Monitor
+import math
 
 i = 0
 while os.path.exists('PendulumRewards/rewards%s.csv' % i):
@@ -111,19 +112,24 @@ class Source(nn.Module):
         x = torch.tanh(self.fc3(x))
         x = torch.tanh(self.fc4(x))
         mu = torch.tanh(self.mu_head(x))
-        sig = F.relu(self.var(x))+1e-5
+        sig = F.relu(self.var(x))+0.5
         return mu, sig
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5*logvar)
         eps = Normal(0, 1)
-        samp = eps.sample()
-        return mu + eps.sample()*std, eps.log_prob(samp)
+        return mu + eps.sample()*std
+
+    def prob(self, act, mean, var):
+        return 1 / var * torch.sqrt(2 * torch.tensor(math.pi)) * \
+               torch.exp((-(act - mean) ** 2) / (2 * var ** 2))
 
     def select_action(self, state):
         mean, var = self.forward(state)
-        return reparameterize(mean, var)
-
+        act = self.reparameterize(mean, var)
+        prob = self.prob(act, mean, var)
+        log_action_prob = torch.log(prob)
+        return act, log_action_prob
 
 
 class Planning(nn.Module):
@@ -152,20 +158,23 @@ class Planning(nn.Module):
         x = torch.tanh(self.fc3(x))
         x = torch.tanh(self.fc4(x))
         mu = torch.tanh(self.mu_head(x))
-        sig = F.relu(self.var(x)) + 1e-5
+        sig = F.relu(self.var(x)) + 0.5
         return mu, sig
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5*logvar)
         eps = Normal(0, 1)
-        samp = eps.sample()
-        return mu + eps.sample()*std, eps.log_prob(samp)
+        return mu + eps.sample()*std
 
+    def prob(self, act, mean, var):
+        return (1 / (var * torch.sqrt(2 * torch.tensor(math.pi))))*torch.exp(-((act - mean)**2)/(2*var**2))
 
     def select_action(self, state, state_next):
-        state_next = torch.from_numpy(state_next).float().unsqueeze(0)
         mean, variance = self.forward(state, state_next)
-        return reparameterize(mean, variance)
+        act = self.reparameterize(mean, variance)
+        prob = self.prob(act, mean, variance)
+        log_action_prob = torch.log(prob)
+        return act, log_action_prob
 
 
 class ActorNet(nn.Module):
@@ -246,14 +255,14 @@ agent = Agent(n_actions=1, n_states=3)
 forward_dynamics = Dynamics()
 source_network = Source(n_actions=1, n_states=3)
 planning_network = Planning(n_actions=1, n_states=3)
-source_optimizer = optim.Adam(source_network.parameters(), lr=1e-4)
-planning_optimizer = optim.Adam(planning_network.parameters(), lr=1e-4)
+source_optimizer = optim.Adam(source_network.parameters(), lr=1e-5)
+planning_optimizer = optim.Adam(planning_network.parameters(), lr=1e-5)
 epoch = 0
 
-#df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
-#df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
-df = pd.DataFrame({'state':[], 'action':[], 'state_':[], 'source_mean':[], 'source_var':[], 'plan_mean':[], 'plan_var':[]})
-df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
+#dfemp = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
+#dfemp.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
+#df = pd.DataFrame({'state':[], 'action':[], 'state_':[], 'source_mean':[], 'source_var':[], 'plan_mean':[], 'plan_var':[]})
+#df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
 #dummy_source_action, dummy_source_log_prob,dummy_source_mean, dummy_source_var, dummy_planning_action, dummy_planning_log_prob, dummy_planning_mean, dummy_planning_var
 while epoch <= 800:
     empowerment = 0
@@ -278,11 +287,11 @@ while epoch <= 800:
             #state_ = Variable(torch.tensor(state_))
 
             #Sample source and planning distributions
-            source_action, source_log_prob = source_network(state_tensor)
-            planning_action, planning_log_prob = planning_network(state_tensor, state_tensor_)
+            source_action, source_log_prob = source_network.select_action(state_tensor)
+            planning_action, planning_log_prob = planning_network.select_action(state_tensor, state_tensor_)
             #Mutual Information and Empowerment
             MI = planning_log_prob - source_log_prob
-            empowerment += (1/M)*BETA*MI #+ torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),
+            empowerment += BETA*MI #+ torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),
                                                                                               #torch.tensor([[1.0]])))
             if memory.isfull:
                 transitions = memory.sample(16)
@@ -298,15 +307,15 @@ while epoch <= 800:
                 pickle.dump(training_records, f)
             break
     training_records.append(TrainingRecord(epoch, running_reward, empowerment.item()))
-    empowerment = -(1/1)*empowerment
+    empowerment = -(1/M)*empowerment
     empowerment.backward(retain_graph=True)
     source_optimizer.step()
     planning_optimizer.step()
     print('Epoch {}\tAverage score: {:.2f}\tAverage Q: {:.2f}\tEmpowerment: {:.2f}'.format(
-                epoch, running_reward, running_q, empowerment.item()))
-    #df = pd.DataFrame({'epoch':[epoch], 'avg_score':[running_reward], 'avg_Q':[running_q],
-    #                   'empowerment':[-empowerment.item()]})
-    #df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=None,mode = 'a')
+                epoch, running_reward, running_q, -empowerment.item()))
+    dfemp = pd.DataFrame({'epoch':[epoch], 'avg_score':[running_reward], 'avg_Q':[running_q],
+                       'empowerment':[-empowerment.item()]})
+    dfemp.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=None,mode = 'a')
     epoch += 1
     BETA += (2000-5)/800
     ########## Means and Variances debugging ######################
@@ -315,18 +324,18 @@ while epoch <= 800:
     dummy_state_ = np.asarray(forward_dynamics.step(dummy_action, dummy_state)[0])
     dummy_state_tensor = Variable(torch.from_numpy(dummy_state))
     dummy_state_tensor_ = Variable(torch.from_numpy(dummy_state_))
-    dummy_source_action, dummy_source_log_prob = source_network(dummy_state_tensor)
+    dummy_source_action, dummy_source_log_prob = source_network.select_action(dummy_state_tensor)
     dummy_source_mean, dummy_source_var = source_network.forward(dummy_state_tensor)
-    dummy_planning_action, dummy_planning_log_prob = planning_network(dummy_state_tensor, dummy_state_tensor_)
+    dummy_planning_action, dummy_planning_log_prob = planning_network.select_action(dummy_state_tensor, dummy_state_tensor_)
     dummy_planning_mean, dummy_planning_var = planning_network.forward(dummy_state_tensor, dummy_state_tensor_)
     print('Test --- state: {}, action:{}, next_state: {},'
           '\n source_action: {}, source_prob: {}, planning_action: {}, planning_prob: {}'.format(dummy_state, dummy_action[0], dummy_state_, dummy_source_action.item(),
             dummy_source_log_prob.item(), dummy_planning_action.item(), dummy_planning_log_prob.item()))
     print('source_mean: {}, source_var: {}'.format(dummy_source_mean.item(), dummy_source_var.item()))
     print('planning_mean: {}, planning_var: {}'.format(dummy_planning_mean.item(), dummy_planning_var.item()))
-    df = pd.DataFrame({'state': [dummy_state], 'action': [dummy_action[0]], 'state_': [dummy_state_], 'source_mean': [dummy_source_mean.item()],
-                       'source_var': [dummy_source_var.item()], 'plan_mean': [dummy_planning_mean.item()], 'plan_var': [dummy_planning_var.item()]})
-    df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=None, mode='a')
+    #df = pd.DataFrame({'state': [dummy_state], 'action': [dummy_action[0]], 'state_': [dummy_state_], 'source_mean': [dummy_source_mean.item()],
+    #                   'source_var': [dummy_source_var.item()], 'plan_mean': [dummy_planning_mean.item()], 'plan_var': [dummy_planning_var.item()]})
+    #df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=None, mode='a')
 
     ###############################################################
 env.close()

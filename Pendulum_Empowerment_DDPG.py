@@ -292,7 +292,7 @@ class Agent():
         return q_eval.mean().item()
 
 training_records = []
-running_reward, running_q = -1000, 0        
+running_reward, running_q = -1000, 0
 memory = Memory(2000)
 agent = Agent(n_actions=1, n_states=3)
 forward_dynamics = Dynamics()

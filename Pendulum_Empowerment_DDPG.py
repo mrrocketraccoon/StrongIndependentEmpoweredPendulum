@@ -298,8 +298,8 @@ agent = Agent(n_actions=1, n_states=3)
 forward_dynamics = Dynamics()
 source_network = Source(n_actions=1, n_states=3)
 planning_network = Planning(n_actions=1, n_states=3)
-source_optimizer = optim.Adam(source_network.parameters(), lr=1e-3)
-planning_optimizer = optim.Adam(planning_network.parameters(), lr=1e-3)
+source_optimizer = optim.Adam(source_network.parameters(), lr=1e-4)
+planning_optimizer = optim.Adam(planning_network.parameters(), lr=1e-4)
 epoch = 0
 
 #df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
@@ -316,22 +316,17 @@ while epoch <= 800:
         score = 0
         state = env.reset()
         for t in range(T):
-            #state = Variable(torch.tensor(state))
             action, policy_dist = agent.select_action(state)
-            #action = torch.tensor(np.asarray(action))
-            #action = Variable(action)
             state, reward, done, _ = env.step(action)
             state = np.asarray(state)
+            state_tensor = Variable(torch.from_numpy(state), requires_grad=True)
             state_ = np.asarray(forward_dynamics.step(action, state)[0])
+            source_action, source_mean, source_log_var = source_network(state_tensor)
+            pred_state_ = np.asarray(forward_dynamics.step((source_action.item(),), state)[0])
             score += reward
             memory.update(Transition(state, action, (reward + 8) / 8, state_))
-            state_tensor = Variable(torch.from_numpy(state))
-            state_tensor_ = Variable(torch.from_numpy(state_))
-            #state_ = Variable(torch.tensor(state_))
-
-            #Sample source and planning distributions
-            source_action, source_mean, source_log_var = source_network(state_tensor)
-            planning_action, planning_mean, planning_log_var = planning_network(state_tensor, state_tensor_)
+            pred_state_tensor_ = Variable(torch.from_numpy(pred_state_), requires_grad=True)
+            planning_action, planning_mean, planning_log_var = planning_network(state_tensor, pred_state_tensor_)
             MI = det_loss(planning_action, action, planning_mean, planning_log_var)
             #Mutual Information and Empowerment
             empowerment += MI#BETA*MI #+ torch.distributions.kl.kl_divergence(policy_dist, Normal(torch.tensor([[0.0]]),

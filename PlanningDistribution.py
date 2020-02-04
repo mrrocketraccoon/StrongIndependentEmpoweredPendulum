@@ -25,12 +25,12 @@ def wrap_env(env):
   env = Monitor(env, './video/videos%s' % i, video_callable=lambda episode_id: episode_id%100==0, force=True)
   return env
 
-env = wrap_env(gym.make("Pendulum-v0"))
+env = gym.make("Pendulum-v0")
 observation_space = env.observation_space.shape[0]
 action_space = env.action_space.shape[0]
 
 #Memory buffer and hyper-params
-TrainingRecord = namedtuple('TrainingRecord', ['epoch', 'reward', 'empowerment'])
+TrainingRecord = namedtuple('TrainingRecord', ['epoch', 'reward'])
 Transition = namedtuple('Transition', ['s', 'a', 'r', 's_'])
 
 class Memory():
@@ -89,52 +89,10 @@ class Dynamics():
 
         newthdot = thdot + (-3*g/(2*l) * np.sin(th + np.pi) + 3./(m*l**2)*u) * dt
         newth = th + newthdot*dt
-        newthdot = np.clip(newthdot, -self.max_speed, self.max_speed)
+        newthdot = np.clip(newthdot, -self.max_speed, self.max_speed) #pylint: disable=E1111
 
         self.state = np.array([np.cos(newth), np.sin(newth), newthdot],dtype=float)
         return self._get_obs(), -costs, False, {}
-
-
-class Source(nn.Module):
-    def __init__(self, n_actions, n_states):
-        super().__init__()
-
-        self.source_mu = nn.Sequential(
-            nn.Linear(n_states, 128),
-            nn.Tanh(),
-            nn.Linear(128, 128),
-            nn.Tanh(),
-            nn.Linear(128, 128),
-            nn.Tanh(),
-            nn.Linear(128, 128),
-            nn.Tanh(),
-            nn.Linear(128, n_actions)
-        )
-        self.source_log_var = nn.Sequential(
-            nn.Linear(n_states, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, n_actions)
-        )
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5*logvar)+ 1e-5
-        eps = torch.rand_like(std)
-        return mu + std*eps
-
-    def forward(self, s):
-        s = s.float().unsqueeze(0)
-        mu = self.source_mu(s)
-        log_var = self.source_log_var(s)
-        act = self.reparameterize(mu, log_var)
-        return act, mu, log_var
-
-
 
 class Planning(nn.Module):
     def __init__(self, n_actions, n_states):
@@ -184,6 +142,15 @@ def ll_gaussian(act, mu, log_var):
     sigma = torch.exp(0.5 * log_var)
     return -0.5 * torch.log(2 * np.pi * sigma**2) - (1 / (2 * sigma**2))* (act-mu)**2
 
+def elbo(act_pred, act, mu, log_var):
+    likelihood = ll_gaussian(act, mu, log_var)
+    log_prior = ll_gaussian(act_pred, mu, log_var)
+    log_p_q = ll_gaussian(act_pred, mu, log_var)
+    return (likelihood + log_prior - log_p_q).mean()
+
+def det_loss(act_pred, act, mu, log_var):
+    return -elbo(act_pred, act, mu, log_var)
+
 def plot_grad_flow(named_parameters):
     '''Plots the gradients flowing through different layers in the net during training.
     Can be used for checking for possible gradient vanishing / exploding problems.
@@ -211,6 +178,7 @@ def plot_grad_flow(named_parameters):
     plt.legend([Line2D([0], [0], color="c", lw=4),
                 Line2D([0], [0], color="b", lw=4),
                 Line2D([0], [0], color="k", lw=4)], ['max-gradient', 'mean-gradient', 'zero-gradient'])
+    plt.show()
 
 class ActorNet(nn.Module):
     def __init__(self, n_actions, n_states):
@@ -249,7 +217,7 @@ class Agent():
         dist = Normal(mu, torch.tensor(self.var, dtype=torch.float))
         action = dist.sample()
         action.clamp(-2.0, 2.0)
-        return (action.item(),), dist
+        return (action.item(),)
 
     def update(self, transitions):
         self.training_step += 1
@@ -272,7 +240,7 @@ class Agent():
         self.optimizer_c.step()
         a_loss.backward(retain_graph=True )
         nn.utils.clip_grad_norm_(self.eval_anet.parameters(), self.max_grad_norm)
-        #self.optimizer_a.step()
+        self.optimizer_a.step()
 
         if self.training_step % 200 == 0:
             self.target_cnet.load_state_dict(self.eval_cnet.state_dict())
@@ -288,86 +256,62 @@ running_reward, running_q = -1000, 0
 memory = Memory(2000)
 agent = Agent(n_actions=1, n_states=3)
 forward_dynamics = Dynamics()
-source_network = Source(n_actions=1, n_states=3)
 planning_network = Planning(n_actions=1, n_states=3)
-source_optimizer = optim.Adam(source_network.parameters(), lr=1e-4)
-planning_optimizer = optim.Adam(planning_network.parameters(), lr = 1e-4)
+planning_optimizer = optim.Adam(planning_network.parameters(), lr = 5e-5)
 epoch = 0
 
-df = pd.DataFrame({'epoch':[], 'avg_score':[], 'avg_Q':[], 'empowerment':[]})
-df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
-df = pd.DataFrame({'state':[], 'action':[], 'state_':[], 'source_mean':[], 'source_var':[], 'plan_mean':[], 'plan_var':[]})
-df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
-#dummy_source_action, dummy_source_log_prob,dummy_source_mean, dummy_source_var, dummy_planning_action, dummy_planning_log_prob, dummy_planning_mean, dummy_planning_var
-while epoch <= 100:
-    empowerment = 0
+while epoch <= 800:
     prev_best_reward = -2000
-    source_optimizer.zero_grad()
     planning_optimizer.zero_grad()
-    trajec_mi = []
     for m in range(M):
         score = 0
         state = env.reset()
-        insta_mi = []
         for t in range(T):
-            action, policy_dist = agent.select_action(state)
+            action = agent.select_action(state)
             state, reward, done, _ = env.step(action)
             state_ = np.asarray(forward_dynamics.step(action, state))[0]
-            state_tensor = Variable(torch.from_numpy(state), requires_grad=True)
-            state_tensor_ = Variable(torch.from_numpy(state_), requires_grad=True)
-            action_tensor = Variable(torch.tensor(action), requires_grad=True)
-            source_action, source_mean, source_log_var = source_network(state_tensor)
-            planning_action, planning_mean, planning_log_var = planning_network(state_tensor, state_tensor_)
-            MI = ll_gaussian(source_action, planning_mean, planning_log_var) - ll_gaussian(source_action, source_mean, source_log_var)
-            insta_mi.append(BETA*MI)
+            state_tensor = Variable(torch.from_numpy(state).float(), requires_grad=True)
+            state_tensor_ = Variable(torch.from_numpy(state_).float(), requires_grad=True)
+            action_tensor = Variable(torch.tensor(action).float(), requires_grad=True)
+            planning_action, planning_mean, planning_log_var = planning_network(state_tensor_, state_tensor)
+            loss = det_loss(planning_action, action_tensor, planning_mean, planning_log_var)
+            loss.backward()
+            #plot_grad_flow(planning_network.named_parameters())
+            planning_optimizer.step()
             score += reward
             memory.update(Transition(state, action, (reward + 8) / 8, state_))
             if memory.isfull:
-                transitions = memory.sample(16)
+                transitions = memory.sample(32)
                 q = agent.update(transitions)
                 running_q = 0.99 * running_q + 0.01 * q
         running_reward = running_reward * 0.9 + score * 0.1
+
         if running_reward > -200 and running_reward > prev_best_reward:
             prev_best_reward = running_reward
             print("Better policy found, reward is now {}!".format(running_reward))
             torch.save(agent.eval_anet.state_dict(), 'ddpg_anet_params.pkl')
             torch.save(agent.eval_cnet.state_dict(), 'ddpg_cnet_params.pkl')
+            prev_best_reward = running_reward
             with open('ddpg_training_records.pkl', 'wb') as f:
                 pickle.dump(training_records, f)
-        trajec_mi.append(sum(insta_mi))
-    empowerment = sum(trajec_mi)/(M*T)
-    empowerment.backward(retain_graph=True)
-    source_optimizer.step()
-    planning_optimizer.step()
-    training_records.append(TrainingRecord(epoch, running_reward, -empowerment.item()))
-    print('Epoch {}\tAverage score: {:.2f}\tAverage Q: {:.2f}\tEmpowerment: {:.2f}'.format(
-                epoch, running_reward, running_q, -empowerment.item()))
-    df = pd.DataFrame({'epoch':[epoch], 'avg_score':[running_reward], 'avg_Q':[running_q],
-                       'empowerment':[-empowerment.item()]})
-    df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=None,mode = 'a')
+            break
+    training_records.append(TrainingRecord(epoch, running_reward))
 
-    dummy_state = np.array([1, 0, 0])
+    dummy_state = np.array([0, 1, 0])
     dummy_action = (0.0,)
     dummy_state_ = np.asarray(forward_dynamics.step(dummy_action, dummy_state)[0])
-    dummy_state_tensor = Variable(torch.from_numpy(dummy_state))
-    dummy_state_tensor_ = Variable(torch.from_numpy(dummy_state_))
-    dummy_source_action, dummy_source_mean, dummy_source_log_var = source_network(dummy_state_tensor)
-    dummy_planning_action, dummy_planning_mean, dummy_planning_log_var = planning_network(dummy_state_tensor, dummy_state_tensor_)
+    dummy_state_tensor = Variable(torch.from_numpy(dummy_state).float(), requires_grad = True)
+    dummy_state_tensor_ = Variable(torch.from_numpy(dummy_state_).float(), requires_grad = True)
+    dummy_planning_action, dummy_planning_mean, dummy_planning_log_var = planning_network(dummy_state_tensor,
+                                                                                          dummy_state_tensor_)
+    print('Epoch {}\tAverage score: {:.2f}\tAverage Q: {:.2f}'.format(
+        epoch, running_reward, running_q))
     print('Test --- state: {}, action:{}, next_state: {},'
-          '\n source_action: {}, source_mean: {}, source source_log_var: {}'
           ' \n planning_action: {}, planning_mean: {}, planning_log_var: {}'
           .format(dummy_state, dummy_action[0], dummy_state_,
-                  dummy_source_action.item(), dummy_source_mean.item(), dummy_source_log_var.item(),
                   dummy_planning_action.item(), dummy_planning_mean.item(), dummy_planning_log_var.item()))
-
     epoch += 1
     BETA += (2000-5)/800
-    ########## Means and Variances debugging ######################
-#    df = pd.DataFrame({'state': [dummy_state], 'action': [dummy_action[0]], 'state_': [dummy_state_], 'source_mean': [dummy_source_mean.item()],
-#                       'source_var': [dummy_source_var.item()], 'plan_mean': [dummy_planning_mean.item()], 'plan_var': [dummy_planning_var.item()]})
-#    df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=None, mode='a')
-
-    ###############################################################
 env.close()
 
 plt.plot([r.epoch for r in training_records], [r.reward for r in training_records])

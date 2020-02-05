@@ -60,6 +60,7 @@ M = 10
 T = 200
 BETA = 5
 PATH = "saved_weights_{}"
+EPOCHS = 100
 
 class Dynamics():
     def __init__(self, g=10.0):
@@ -249,7 +250,7 @@ class Agent():
         dist = Normal(mu, torch.tensor(self.var, dtype=torch.float))
         action = dist.sample()
         action.clamp(-2.0, 2.0)
-        return (action.item(),), dist
+        return (action.item(),)
 
     def update(self, transitions):
         self.training_step += 1
@@ -299,7 +300,7 @@ df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True
 df = pd.DataFrame({'state':[], 'action':[], 'state_':[], 'source_mean':[], 'source_var':[], 'plan_mean':[], 'plan_var':[]})
 df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
 #dummy_source_action, dummy_source_log_prob,dummy_source_mean, dummy_source_var, dummy_planning_action, dummy_planning_log_prob, dummy_planning_mean, dummy_planning_var
-while epoch <= 200:
+while epoch < EPOCHS:
     empowerment = 0
     prev_best_reward = -2000
     source_optimizer.zero_grad()
@@ -310,14 +311,14 @@ while epoch <= 200:
         state = env.reset()
         insta_mi = []
         for t in range(T):
-            action, policy_dist = agent.select_action(state)
+            action = agent.select_action(state)
             state, reward, done, _ = env.step(action)
             state_ = np.asarray(forward_dynamics.step(action, state))[0]
             state_tensor = Variable(torch.from_numpy(state), requires_grad=True)
             state_tensor_ = Variable(torch.from_numpy(state_), requires_grad=True)
             action_tensor = Variable(torch.tensor(action), requires_grad=True)
             source_action, source_mean, source_log_var = source_network(state_tensor)
-            source_state_ = np.asarray(forward_dynamics.step(source_action, state))[0]
+            source_state_ = np.asarray(forward_dynamics.step((source_action.item(),), state))[0]
             source_state_tensor_ = Variable(torch.from_numpy(source_state_), requires_grad=True)
             planning_action, planning_mean, planning_log_var = planning_network(state_tensor, source_state_tensor_)
             MI = ll_gaussian(source_action, planning_mean, planning_log_var) - ll_gaussian(source_action, source_mean, source_log_var)
@@ -337,7 +338,7 @@ while epoch <= 200:
             with open('ddpg_training_records.pkl', 'wb') as f:
                 pickle.dump(training_records, f)
         trajec_mi.append(sum(insta_mi))
-    empowerment = sum(trajec_mi)/(M*T)
+    empowerment = -sum(trajec_mi)/(M*T)
     empowerment.backward(retain_graph=True)
     source_optimizer.step()
     planning_optimizer.step()

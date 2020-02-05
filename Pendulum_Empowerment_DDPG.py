@@ -272,7 +272,7 @@ class Agent():
         self.optimizer_c.step()
         a_loss.backward(retain_graph=True )
         nn.utils.clip_grad_norm_(self.eval_anet.parameters(), self.max_grad_norm)
-        #self.optimizer_a.step()
+        self.optimizer_a.step()
 
         if self.training_step % 200 == 0:
             self.target_cnet.load_state_dict(self.eval_cnet.state_dict())
@@ -299,7 +299,7 @@ df.to_csv("PendulumRewards/rewards%s.csv" % i, sep='\t', index=None, header=True
 df = pd.DataFrame({'state':[], 'action':[], 'state_':[], 'source_mean':[], 'source_var':[], 'plan_mean':[], 'plan_var':[]})
 df.to_csv("PendulumRewards/meansvars%s.csv" % i, sep='\t', index=None, header=True, mode = 'a')
 #dummy_source_action, dummy_source_log_prob,dummy_source_mean, dummy_source_var, dummy_planning_action, dummy_planning_log_prob, dummy_planning_mean, dummy_planning_var
-while epoch <= 100:
+while epoch <= 200:
     empowerment = 0
     prev_best_reward = -2000
     source_optimizer.zero_grad()
@@ -317,7 +317,9 @@ while epoch <= 100:
             state_tensor_ = Variable(torch.from_numpy(state_), requires_grad=True)
             action_tensor = Variable(torch.tensor(action), requires_grad=True)
             source_action, source_mean, source_log_var = source_network(state_tensor)
-            planning_action, planning_mean, planning_log_var = planning_network(state_tensor, state_tensor_)
+            source_state_ = np.asarray(forward_dynamics.step(source_action, state))[0]
+            source_state_tensor_ = Variable(torch.from_numpy(source_state_), requires_grad=True)
+            planning_action, planning_mean, planning_log_var = planning_network(state_tensor, source_state_tensor_)
             MI = ll_gaussian(source_action, planning_mean, planning_log_var) - ll_gaussian(source_action, source_mean, source_log_var)
             insta_mi.append(BETA*MI)
             score += reward
